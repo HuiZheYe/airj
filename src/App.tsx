@@ -25,6 +25,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { cn } from '@/lib/utils';
+import { supabase } from '@/lib/supabase';
 
 interface DiaryEntry {
   id: string;
@@ -39,23 +40,50 @@ export default function App() {
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingEntries, setIsLoadingEntries] = useState(true);
+  const [dbError, setDbError] = useState<string | null>(null);
 
-  // Load entries from localStorage
+  // Load entries from Supabase on first render.
   useEffect(() => {
-    const saved = localStorage.getItem('cream-diary-entries');
-    if (saved) {
-      try {
-        setEntries(JSON.parse(saved));
-      } catch (e) {
-        console.error('Failed to parse saved entries', e);
+    let isMounted = true;
+
+    async function loadEntries() {
+      setIsLoadingEntries(true);
+      setDbError(null);
+
+      const { data, error } = await supabase
+        .from('diary_entries')
+        .select('id, date, title, content, last_modified')
+        .order('last_modified', { ascending: false });
+
+      if (!isMounted) return;
+
+      if (error) {
+        console.error('Failed to load entries from Supabase', error);
+        setDbError(`读取失败：${error.message}`);
+        setIsLoadingEntries(false);
+        return;
       }
-    }
-  }, []);
 
-  // Save entries to localStorage
-  useEffect(() => {
-    localStorage.setItem('cream-diary-entries', JSON.stringify(entries));
-  }, [entries]);
+      const normalizedEntries: DiaryEntry[] = (data ?? []).map((item) => ({
+        id: String(item.id),
+        date: String(item.date),
+        title: String(item.title ?? ''),
+        content: String(item.content ?? ''),
+        lastModified: Number(item.last_modified ?? Date.now()),
+      }));
+
+      setEntries(normalizedEntries);
+      setCurrentId((prev) => prev ?? (normalizedEntries[0]?.id ?? null));
+      setIsLoadingEntries(false);
+    }
+
+    loadEntries();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const currentEntry = useMemo(() => 
     entries.find(e => e.id === currentId) || null
@@ -89,16 +117,40 @@ export default function App() {
     ));
   };
 
-  const handleDeleteEntry = (id: string) => {
+  const handleDeleteEntry = async (id: string) => {
     if (confirm('确定要删除这篇日记吗？')) {
+      const { error } = await supabase.from('diary_entries').delete().eq('id', id);
+      if (error) {
+        setDbError(`删除失败：${error.message}`);
+        return;
+      }
       setEntries(prev => prev.filter(e => e.id !== id));
       if (currentId === id) setCurrentId(null);
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (!currentEntry) return;
     setIsSaving(true);
-    setTimeout(() => setIsSaving(false), 1000);
+    setDbError(null);
+
+    const { error } = await supabase.from('diary_entries').upsert(
+      {
+        id: currentEntry.id,
+        date: currentEntry.date,
+        title: currentEntry.title,
+        content: currentEntry.content,
+        last_modified: currentEntry.lastModified,
+      },
+      { onConflict: 'id' }
+    );
+
+    if (error) {
+      console.error('Failed to save entry', error);
+      setDbError(`保存失败：${error.message}`);
+    }
+
+    setIsSaving(false);
   };
 
   return (
@@ -198,7 +250,11 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col bg-background/50 relative">
         <AnimatePresence mode="wait">
-          {currentEntry ? (
+          {isLoadingEntries ? (
+            <div className="flex-1 flex items-center justify-center p-12 text-muted-foreground">
+              正在读取历史日记...
+            </div>
+          ) : currentEntry ? (
             <motion.div 
               key={currentEntry.id}
               initial={{ opacity: 0, x: 20 }}
@@ -218,7 +274,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button 
+                  <Button
                     variant="ghost" 
                     size="sm" 
                     onClick={() => handleDeleteEntry(currentEntry.id)}
@@ -253,6 +309,13 @@ export default function App() {
               {/* Editor */}
               <div className="flex-1 overflow-auto p-8 md:p-12 lg:p-20">
                 <div className="max-w-3xl mx-auto space-y-8">
+                  {dbError && (
+                    <Card className="border-destructive/30 bg-destructive/5">
+                      <CardContent className="p-4 text-sm text-destructive">
+                        {dbError}
+                      </CardContent>
+                    </Card>
+                  )}
                   <Input 
                     placeholder="给今天起个标题吧..."
                     value={currentEntry.title}
